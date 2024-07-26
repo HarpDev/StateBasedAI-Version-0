@@ -6,17 +6,24 @@ public enum AIState
 {
     WANDER,
     CHASE,
-    SEARCHING
+    SEARCHING,
+    HIDING,
+    STALKING
 }
 
 public class StateAI : MonoBehaviour
 {
+    [Header("AI facts")]
+    public bool doesAISeePlayer;
+
+
     [Header("Player")]
     public Transform Player;
     public Transform SmartAIBody;
     public Camera PlayerCam;
 
     private NavMeshAgent agent;
+    [SerializeField]
     private AIState currentState;
     private Coroutine chaseCoroutine;
     private Vector3 lastSeenPlayerPosition;
@@ -26,10 +33,20 @@ public class StateAI : MonoBehaviour
     public float chaseSpeed = 6f;
     public float wanderSpeed = 3.5f;
     public float searchSpeed = 4f;
+    public float hideSpeed = 7f;
+    public float stalkSpeed = 3f;
+    public float stareSpeed = 0f;
     public float searchRadius = 5f;
     public float minSearchTime = 5f;
     public float maxSearchTime = 30f;
     public float chaseLostSightTime = 3f;
+    public float runAwayToHideTime = 9f;
+
+    [Header("AI memory")]
+    public float memoryDuration = 10f; // Time in seconds to remember the player
+    public bool memoryActive; // Indicates if the memory is active
+    [SerializeField]
+    private float memoryTimer;
 
     [Header("AI Vision")]
     public float viewDistance = 10f;
@@ -38,8 +55,8 @@ public class StateAI : MonoBehaviour
     [Header("AI Light")]
     public Light stateLight;
 
-    private bool _isBlocked = false;
-    private bool _isViewed = false;
+    private bool _isBlocked = false;//if the AI is being blocked from direct line of sight of the player
+    public bool _isViewed = false;//is the AI actively being looked at by the player's camera
     private bool _isBeingShinedByLight = false;
     private float aiDistance;
 
@@ -52,6 +69,32 @@ public class StateAI : MonoBehaviour
 
     void Update()
     {
+        if (!IsPlayerInSight())
+        {
+            doesAISeePlayer = false;
+
+        }
+        else
+        {
+            doesAISeePlayer = true;
+        }
+
+        if(doesAISeePlayer == true)
+        {
+            ResetMemoryTimer();
+        }
+
+        if (memoryActive)
+        {
+            currentState = AIState.CHASE;
+            memoryTimer -= Time.deltaTime;
+            if (memoryTimer <= 0)
+            {
+                memoryActive = false;
+                OnMemoryLost();
+            }
+        }
+
         switch (currentState)
         {
             case AIState.WANDER:
@@ -63,11 +106,30 @@ public class StateAI : MonoBehaviour
             case AIState.SEARCHING:
                 Search();
                 break;
+            case AIState.HIDING:
+                Hide();
+                break;
+            case AIState.STALKING:
+                Stalk();
+                break;
         }
 
         IsVisibleToPlayerCheck();
         StateTransitions();
         IsPlayerInSight();
+    }
+
+    public void ResetMemoryTimer()
+    {
+        memoryTimer = memoryDuration;
+        memoryActive = true;
+    }
+
+    void OnMemoryLost()
+    {
+        Debug.Log("Memory of the player has run out.");
+        // Implement what should happen when memory runs out
+        currentState = AIState.SEARCHING;
     }
 
     private void Wander()
@@ -100,6 +162,16 @@ public class StateAI : MonoBehaviour
             NavMesh.SamplePosition(randomDirection, out hit, searchRadius, 1);
             agent.SetDestination(hit.position);
         }
+    }
+
+    private void Hide()
+    {
+        StartCoroutine(RunAwayFromPlayer());
+    }
+
+    private void Stalk()
+    {
+        StartCoroutine(StalkPlayer());
     }
 
     private void IsVisibleToPlayerCheck()
@@ -144,21 +216,35 @@ public class StateAI : MonoBehaviour
 
     private bool IsPlayerInSight()
     {
+        // Calculate direction and distance to the player
         Vector3 directionToPlayer = Player.position - SmartAIBody.position;
-        float angleToPlayer = Vector3.Angle(directionToPlayer, SmartAIBody.forward);
+        float distanceToPlayer = directionToPlayer.magnitude;
 
-        if (angleToPlayer < fieldOfViewAngle * 0.5f && directionToPlayer.magnitude < viewDistance)
+        // Check if the player is within the field of view and view distance
+        if (distanceToPlayer < viewDistance)
         {
-            RaycastHit hit;
-            if (Physics.Linecast(SmartAIBody.position, Player.position, out hit))
+            // Normalize directionToPlayer to get a unit vector
+            directionToPlayer.Normalize();
+
+            // Calculate the angle between the AI's forward direction and the direction to the player
+            float angleToPlayer = Vector3.Angle(directionToPlayer, SmartAIBody.forward);
+
+            if (angleToPlayer < fieldOfViewAngle * 0.5f)
             {
-                if (hit.collider.gameObject == Player.gameObject)
+                // Check if there is an unobstructed line of sight to the player
+                RaycastHit hit;
+                if (Physics.Linecast(SmartAIBody.position, Player.position, out hit))
                 {
-                    lastSeenPlayerPosition = Player.position;
-                    return true;
+                    if (hit.collider.gameObject == Player.gameObject)
+                    {
+                        // Player is in sight
+                        lastSeenPlayerPosition = Player.position;
+                        return true;
+                    }
                 }
             }
         }
+        // Player is not in sight
         return false;
     }
 
@@ -171,7 +257,7 @@ public class StateAI : MonoBehaviour
                 StopCoroutine(chaseCoroutine);
                 chaseCoroutine = null;
             }
-            currentState = AIState.CHASE;
+            //currentState = AIState.CHASE;
         }
         else if (currentState == AIState.CHASE)
         {
@@ -194,7 +280,7 @@ public class StateAI : MonoBehaviour
     private IEnumerator LoseSight()
     {
         yield return new WaitForSeconds(chaseLostSightTime);
-        if (!IsPlayerInSight())
+        if (!IsPlayerInSight() && memoryTimer < memoryTimer/2)
         {
             currentState = AIState.SEARCHING;
             StartCoroutine(SearchForPlayer());
@@ -209,7 +295,7 @@ public class StateAI : MonoBehaviour
 
         while (elapsedTime < searchTime)
         {
-            if (IsPlayerInSight())
+            if (memoryActive)
             {
                 currentState = AIState.CHASE;
                 yield break;
@@ -220,6 +306,65 @@ public class StateAI : MonoBehaviour
         }
 
         currentState = AIState.WANDER;
+    }
+
+    private IEnumerator StalkPlayer()
+    {
+        while (true)
+        {
+            bool shouldStare = Random.value > 0.5f;
+
+            if (shouldStare)
+            {
+                agent.isStopped = true;
+                yield return new WaitForSeconds(Random.Range(minSearchTime, maxSearchTime));
+            }
+            else
+            {
+                agent.isStopped = false;
+                agent.speed = stalkSpeed;
+                agent.SetDestination(Player.position);
+                while (agent.pathPending || agent.remainingDistance > agent.stoppingDistance)
+                {
+                    yield return null;
+                }
+            }
+
+            if (!IsPlayerInSight())
+            {
+                currentState = AIState.WANDER;
+                UpdateStateLight();
+                yield break;
+            }
+
+            yield return new WaitForSeconds(1f); // Wait a bit before deciding the next action
+        }
+    }
+
+    private IEnumerator RunAwayFromPlayer()
+    {
+        while (true)
+        {   
+            Vector3 hideDirection = (transform.position - Player.position).normalized * wanderRadius;
+            NavMeshHit hit;
+            NavMesh.SamplePosition(hideDirection, out hit, wanderRadius, 1);
+            agent.SetDestination(hit.position);
+            agent.speed = hideSpeed;
+
+            while (agent.pathPending || agent.remainingDistance > agent.stoppingDistance)
+            {
+                yield return null;
+            }
+
+            if (!IsPlayerInSight())
+            {
+                currentState = AIState.WANDER;
+                UpdateStateLight();
+                yield break;
+            }
+
+            yield return new WaitForSeconds(1f); // Wait a bit before finding a new hiding spot
+        }
     }
 
     private void UpdateStateLight()
